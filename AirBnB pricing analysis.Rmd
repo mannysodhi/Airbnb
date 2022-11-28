@@ -1,0 +1,127 @@
+---
+title: "Asheville Airbnb Pricing Analysis"
+author: "Manmeet Sodhi"
+date: "`7/12/2022"
+output: html_document
+---
+
+```{r}
+# Libraries, read in data
+library("tidyverse")
+library("Hmisc")
+library("lubridate")
+library("ggplot2")
+library("GGally")
+listings <- read.csv("listings.csv")
+```
+
+## Pick and prepare variables of interest.
+
+```{r}
+# Is there a difference between host_total_listings and host_total_listings_count? No.
+sum(listings$host_listings_count != listings$host_total_listings_count)
+
+# Only keep the variables we're interested in.
+listings.analysis <- listings %>% select(id, host_since, last_scraped, host_response_time,
+                                         host_response_rate, host_is_superhost, host_listings_count,
+                                         zipcode = neighbourhood_cleansed, property_type, room_type, 
+                                         accommodates, bathrooms_text, bedrooms, beds, amenities, price,
+                                         minimum_nights, maximum_nights, number_of_reviews,
+                                         review_scores_rating, )
+
+# Any variable transformations needed? Yeah, several.
+str(listings.analysis)
+print("")
+
+# Convert host_since to date.
+cols <- c("host_since", "last_scraped")
+listings.analysis[cols] <- lapply(listings.analysis[cols], as_date)
+
+# Calculate number of years hosting.
+listings.analysis$years_hosting = interval(listings.analysis$host_since, listings.analysis$last_scraped) %>%as.numeric('years')
+
+# Turn response rate into numeric.
+listings.analysis$host_response_rate = as.numeric(gsub("%", "", listings.analysis$host_response_rate))
+
+# Turn superhost into binary.
+listings.analysis$host_is_superhost = (listings.analysis$host_is_superhost == "t")
+
+# Create downtown/central Asheville flag.
+listings.analysis$centralasheville = (listings.analysis$zipcode == "28801")
+
+# Make relevant variables factors.
+cols <- c("host_is_superhost", "host_response_time", "zipcode", "room_type")
+listings.analysis[cols] <- lapply(listings.analysis[cols], factor)
+
+# Dealing with "$" as special char: https://stackoverflow.com/questions/50690899/r-gsub-not-removing-in-data
+listings.analysis$price = as.numeric(gsub("\\$", "", listings.analysis$price))
+
+# Tried counting quotes and dividing by 2 but some cases, like 32" TV will introduce an additional quote. Counting commas plus 1 is more accurate.
+listings.analysis$amenities_count = str_count(listings.analysis$amenities, ',')+1
+
+# Extract number of bathrooms from bathrooms_text. We're losing shared vs not shared but let's keep it simple for now.
+listings.analysis$bathrooms_text = ifelse(listings.analysis$bathrooms_text == "Half-bath", "0.5", listings.analysis$bathrooms_text)
+listings.analysis$bathrooms = parse_number(listings.analysis$bathrooms_text)
+
+# Adjust reviews. Let's try to isolate "really" bad reviews as less than or equal to 1st quartile.
+reviews_median <- summary(listings.analysis$review_scores_rating)[2]
+listings.analysis$review_scores_rating = as.numeric(listings.analysis$review_scores_rating)
+
+# Consider case of limited number of reviews, and therefore overall bad review rating?
+listings.analysis <- listings.analysis %>%
+mutate(review_scores_factor = case_when(
+  listings.analysis$review_scores_rating > 4.8 ~ "goodReview",
+  listings.analysis$review_scores_rating <= reviews_median ~ "badReview",
+  is.na(listings.analysis$review_scores_rating)==TRUE ~ "missingReview"
+))
+listings.analysis$review_scores_factor = as.factor(listings.analysis$review_scores_factor)
+
+# Ok, how's it look now?
+str(listings.analysis)
+```
+
+## Descriptive Statistics
+
+```{r}
+# Descriptive stats on all variables of interest.
+describe(subset(listings.analysis, select = -c(id, amenities, bathrooms_text)))
+```
+
+* Price missing for 15 of 2,841 obs; Beds is missing for 31; Bathrooms for 1; Bedrooms for 163, and host_response_rate for 258.
+* Zipcode has 8 levels. This is manageable, but if certain codes drop out of the regression or are insigificant, it may make sense to use centralasheville instead, which is a binary equal to 1 if the zipcode is 28801 (representing central/downtown Asheville) and 0 otherwise.
+* Property_type has 51 levels. This is too many for the regression and may not be needed anyway.
+* Room_type is manageable at 4 levels. We can see if any are significant.
+* Accommodates goes up to 16, though the majority of observations are <10.
+* Amenities has tremendous diversity and therefore we just created a variable counting the number of amenities (amenities_count).
+* Reviews are typically all positive, so we opted to create a flag for if the average review score was not very high. We bundled all reviews less than or equal to the 1st quartile and labeled them as bad reviews. There are 184 records missing review scores.
+
+## GGpairs, correlations, and some validations this prompted.
+
+```{r}
+# Checking correlations first for what are likely our biggest predictors.
+cor(listings.analysis[, c("price", "accommodates", "beds", "bathrooms", "amenities_count", "years_hosting")], use = "complete.obs")
+# Somewhat surprising years_hosting is negatively correlated with price, but maybe owners get lazy or tired of the work?
+ggpairs(listings.analysis[, c("price", "accommodates", "beds", "bathrooms", "amenities_count", "host_listings_count", "years_hosting")])
+
+# What's going on with host listings count?
+# Histogram + summary indicates it's better than the ggpairs scatterplot looks. Nearly all observations are between 1 and 4, and then we have three groups of outliers: one around ~125, 150, another around ~200, and a final one at 600+. Perhaps these are simply property management companies.
+summary(listings.analysis$host_listings_count)
+hist(listings.analysis$host_listings_count)
+
+# How is our response variable? Normal, with a long right tail. Possible groups for cluster analysis: 1-50, 51-99, 100-199, 200-299, 300-399, 400+.
+hist(listings.analysis$price, breaks = 50)
+
+# Zipcodes distribution is fine.
+table(listings.analysis$zipcode)
+# 28801 is downtown/central Asheville. This is most expensive. If it ends up being best to just use this in the regression, go for it.
+ggpairs(listings.analysis[, c("price", "zipcode", "centralasheville")])
+
+# Room_type. Hotels are most expensive, followed by entire homes/apts. Nothing too surprising here.
+ggpairs(listings.analysis[, c("price", "room_type")])
+```
+
+##  Code Used
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE,tidy=F}
+
+```
